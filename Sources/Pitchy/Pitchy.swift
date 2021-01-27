@@ -1,5 +1,7 @@
+import Accelerate
 import AudioToolbox
 import AVFoundation
+import Surge
 
 extension OSStatus {
     func noErrOr(error: Error) throws {
@@ -23,11 +25,11 @@ extension Optional {
 
 extension Data {
     func elements<T>() -> [T] {
-        return self.withUnsafeBytes { ptr in
+        return withUnsafeBytes { ptr in
             let start = ptr.baseAddress?.assumingMemoryBound(to: T.self)
             let buffer = UnsafeBufferPointer(start: start,
                                              count: self.count / MemoryLayout<T>.size)
-            return Array<T>(buffer)
+            return [T](buffer)
         }
     }
 }
@@ -40,19 +42,20 @@ public enum PitchyError: Error {
 }
 
 public class Pitchy {
-    public typealias FreqUpdate = (_ freq: Double?) -> Void
+    public typealias FreqUpdate = (_ freq: Float?) -> Void
     
     fileprivate let ioUnit: AudioUnit
     fileprivate let comp: AudioComponent
+    fileprivate let sampleRate: Float
     fileprivate var isRunning: Bool
     fileprivate var update: FreqUpdate?
-    fileprivate var overlap: Data
     
     public init() throws {
         isRunning = false
-        overlap = Data()
         let session = AVAudioSession.sharedInstance()
         try session.setCategory(AVAudioSession.Category.record, mode: AVAudioSession.Mode.spokenAudio)
+        
+        sampleRate = Float(session.sampleRate)
         
         var compDesc = AudioComponentDescription(
             componentType: kAudioUnitType_Output,
@@ -84,7 +87,7 @@ public class Pitchy {
             .noErrOr(error: PitchyError.auInitFail)
         
         var asbd = AudioStreamBasicDescription(
-            mSampleRate: session.sampleRate,
+            mSampleRate: Double(sampleRate),
             mFormatID: kAudioFormatLinearPCM,
             mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
             mBytesPerPacket: 4,
@@ -148,21 +151,20 @@ public class Pitchy {
         }
     }
     
-    fileprivate func noisegate(_ data: Data, release: Float, threshold: Float) -> Bool {
+    fileprivate func noisegate(_ samples: [Float], release: Float, threshold: Float) -> Bool {
         var releaseRatio = Float(1.0)
         var releaseSpeed = Float(1.0)
         var gateState = false
         
         if release != 0 {
-            releaseSpeed = 1.0/release
+            releaseSpeed = 1.0 / release
         }
         
-        let elements: [Float32] = data.elements()
-        for sample in elements {
+        for sample in samples {
             if fabsf(sample) < threshold {
                 if gateState {
                     releaseRatio -= releaseSpeed
-                    if (releaseRatio <= 0) {
+                    if releaseRatio <= 0 {
                         releaseRatio = 0
                         gateState = false
                     }
@@ -177,9 +179,148 @@ public class Pitchy {
         return gateState
     }
     
-    fileprivate func process(_ data: Data) {
-        if noisegate(data, release: 50.0, threshold: 0.02) {
-            update?(20)
+    fileprivate func hamming(_ samples: [Float]) -> [Float] {
+        var original = samples
+        var result = samples
+        var window = [Float](repeating: 0, count: samples.count)
+        vDSP_hann_window(
+            &window,
+            vDSP_Length(window.count),
+            Int32(vDSP_HANN_NORM))
+        
+        vDSP_vmul(&original, 1, window, 1, &result, 1, vDSP_Length(window.count))
+        
+        return result
+    }
+    
+    fileprivate func alignPhases(_ samples: [Float]) -> [Float] {
+        var result = fft(samples)
+        result = mul(result, result[0])
+        return result
+    }
+    
+    fileprivate func peakPicking(_ samples: [Float]) -> [Int] {
+        let halfcount = samples.count / 2 - 1
+        var pos = 0
+        var curMaxPos = 0
+        var maximas = [Int]()
+        
+        // find the first negative zero crossing
+        while pos < halfcount, samples[pos] > 0 {
+            pos += 1
+        }
+
+        // loop over all the values below zero
+        while pos < halfcount, samples[pos] <= 0.0 {
+            pos += 1
+        }
+        
+        if pos == 0 {
+            pos = 1
+        }
+
+        while pos < halfcount {
+            if samples[pos] > samples[pos - 1], samples[pos] >= samples[pos + 1] {
+                if curMaxPos == 0 {
+                    // the first max (between zero crossings)
+                    curMaxPos = pos
+                }
+                else if samples[pos] > samples[curMaxPos] {
+                    // a higher max (between the zero crossings)
+                    curMaxPos = pos
+                }
+            }
+            pos += 1
+            // a negative zero crossing
+            if pos < halfcount, samples[pos] <= 0 {
+                // if there was a maximum add it to the list of maxima
+                if curMaxPos > 0 {
+                    maximas.append(curMaxPos)
+                    // clear the maximum position, so we start looking for a new one
+                    curMaxPos = 0
+                }
+                while pos < halfcount, samples[pos] <= 0 {
+                    pos += 1 // loop over all the values below zero
+                }
+            }
+        }
+        
+        // if there was a maximum in the last part
+        if curMaxPos > 0 {
+            maximas.append(curMaxPos)
+        }
+
+        return maximas
+    }
+    
+    fileprivate func parabolicInterpolation(_ bins: [Float], peak: Int) -> (Float, Float) {
+        let nsdfa = bins[peak - 1]
+        let nsdfb = bins[peak]
+        let nsdfc = bins[peak + 1]
+        let bval = peak
+        let bottom = nsdfc + nsdfa - 2 * nsdfb
+        
+        if bottom == 0 {
+            return (Float(bval), Float(nsdfb))
+        }
+        else {
+            let delta = nsdfa - nsdfc
+            return (
+                Float(Float(bval) + delta / (2 * bottom)),
+                Float(nsdfb - delta * delta / (8 * bottom)))
+        }
+    }
+
+    fileprivate func estimatePitch(_ bins: [Float], peaks: [Int]) -> Float? {
+        var highestAmplitude = -Float.greatestFiniteMagnitude;
+        var turningPoints = [(Float, Float)]()
+        
+        for peak in peaks {
+            // make sure every annotation has a probability attached
+            highestAmplitude = fmax(highestAmplitude, bins[peak])
+
+            if (bins[peak] > 0.75) {
+                // calculates turningPointX and Y
+                let tp = parabolicInterpolation(bins, peak: peak)
+                turningPoints.append(tp)
+
+                // remember the highest amplitude
+                highestAmplitude = fmax(highestAmplitude, tp.1)
+            }
+        }
+
+        if (turningPoints.count == 0) {
+            return nil
+        }
+        else {
+            // use the overall maximum to calculate a cutoff.
+            // The cutoff value is based on the highest value and a relative
+            // threshold.
+            let actualCutoff =  0.997 * highestAmplitude;
+
+            // find first period above or equal to cutoff
+            guard let periodIndex = turningPoints
+                    .firstIndex(where: { $0.1 >= actualCutoff }) else {
+                return nil
+            }
+
+            let period = turningPoints[periodIndex].0;
+            let pitchEstimate = sampleRate / period
+            if pitchEstimate > 0 && pitchEstimate <= sampleRate / 2.0 {
+                return pitchEstimate
+            } else {
+                return nil
+            }
+        }
+    }
+    
+    fileprivate func process(_ samples: [Float]) {
+        if noisegate(samples, release: 50.0, threshold: 0.02) {
+            let windowed = hamming(samples)
+            let bins = alignPhases(windowed)
+            let peaks = peakPicking(bins)
+            let pitch = estimatePitch(bins, peaks: peaks)
+            update?(pitch)
         }
     }
 }
@@ -194,11 +335,11 @@ func recordingCallback(
 {
     let `self` = unsafeBitCast(inRefCon, to: Pitchy.self)
     var bufferList = AudioBufferList(
-            mNumberBuffers: 1,
-            mBuffers: AudioBuffer(
-                mNumberChannels: 1,
-                mDataByteSize: 1024,
-                mData: nil))
+        mNumberBuffers: 1,
+        mBuffers: AudioBuffer(
+            mNumberChannels: 1,
+            mDataByteSize: 1024,
+            mData: nil))
     var status = noErr
     
     status = AudioUnitRender(self.ioUnit,
@@ -215,10 +356,11 @@ func recordingCallback(
     if let data = bufferList.mBuffers.mData {
         let size = bufferList.mBuffers.mDataByteSize
         let data = Data(
-            bytes:  data,
+            bytes: data,
             count: Int(size))
         DispatchQueue.main.async {
-            self.process(data)
+            let samples: [Float32] = data.elements()
+            self.process(samples)
         }
     }
     

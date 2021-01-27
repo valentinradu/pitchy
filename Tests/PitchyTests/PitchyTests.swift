@@ -1,15 +1,22 @@
 import XCTest
 @testable import Pitchy
 
+
 final class PitchyTests: XCTestCase {
-    func testExample() {
-        // This is an example of a functional test case.
-        // Use XCTAssert and related functions to verify your tests produce the correct
-        // results.
-        XCTAssertEqual(Pitchy().text, "Hello, World!")
+    func testFreqUpdates() throws {
+        let expect = XCTestExpectation(description: "Receive freq updates")
+        let pitchy = try Pitchy()
+        try pitchy.start { freq in
+            if let freq = freq {
+                XCTAssertGreaterThan(freq, 0)
+            }
+            expect.fulfill()
+        }
+        wait(for: [expect], timeout: 20)
+        try pitchy.stop()
     }
 
     static var allTests = [
-        ("testExample", testExample),
+        ("Basic", testFreqUpdates),
     ]
 }

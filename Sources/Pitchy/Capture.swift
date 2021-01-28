@@ -11,12 +11,9 @@ public class Capture {
     fileprivate var isRunning: Bool
     fileprivate var update: SamplesUpdate?
     
-    public init() throws {
+    public init(sampleRate _sampleRate: Float) throws {
         isRunning = false
-        let session = AVAudioSession.sharedInstance()
-        try session.setCategory(AVAudioSession.Category.record, mode: AVAudioSession.Mode.spokenAudio)
-        
-        sampleRate = Float(session.sampleRate)
+        sampleRate = _sampleRate
         
         var compDesc = AudioComponentDescription(
             componentType: kAudioUnitType_Output,

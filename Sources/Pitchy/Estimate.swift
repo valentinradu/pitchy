@@ -4,13 +4,10 @@ import AVFoundation
 
 public class Estimate {
     
-    fileprivate let sampleRate: Float
+    private let sampleRate: Float
     
-    public init() throws {
-        let session = AVAudioSession.sharedInstance()
-        try session.setCategory(AVAudioSession.Category.record, mode: AVAudioSession.Mode.spokenAudio)
-        
-        sampleRate = Float(session.sampleRate)
+    public init(sampleRate _sampleRate: Float) {
+        sampleRate = _sampleRate
     }
     
     fileprivate func noisegate(_ samples: [Float], release: Float, threshold: Float) -> Bool {

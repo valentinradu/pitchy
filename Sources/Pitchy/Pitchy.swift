@@ -9,8 +9,11 @@ public class Pitchy {
     private let estimate: Estimate
 
     public init() throws {
-        capture = try Capture()
-        estimate = try Estimate()
+        let session = AVAudioSession.sharedInstance()
+        try session.setCategory(AVAudioSession.Category.record, mode: AVAudioSession.Mode.spokenAudio)
+        let sampleRate = Float(session.sampleRate)
+        capture = try Capture(sampleRate: sampleRate)
+        estimate = Estimate(sampleRate: sampleRate)
     }
 
     public func start(update: @escaping FreqUpdate) throws {

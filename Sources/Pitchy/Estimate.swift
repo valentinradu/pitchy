@@ -217,7 +217,7 @@ public class Estimate {
             // use the overall maximum to calculate a cutoff.
             // The cutoff value is based on the highest value and a relative
             // threshold.
-            let actualCutoff = 0.997 * highestAmplitude
+            let actualCutoff = 0.99 * highestAmplitude
 
             // find first period above or equal to cutoff
             guard let periodIndex = turningPoints

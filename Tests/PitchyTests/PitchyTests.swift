@@ -43,7 +43,7 @@ final class PitchyTests: XCTestCase {
         let estimate = Estimate(sampleRate: sampleRate)
         let samples = generateSamples(
             freq: freq, size: 32 * 1024,
-            maxamp: 0.03, offset: 125, sampleRate: sampleRate)
+            maxamp: 0.03, offset: 75, sampleRate: sampleRate)
         if let pitch = estimate.process(samples) {
             XCTAssertEqual(pitch, freq, accuracy: 0.25)
         }
@@ -57,9 +57,9 @@ final class PitchyTests: XCTestCase {
         let estimate = Estimate(sampleRate: sampleRate)
         let samples = generateSamples(
             freq: freq, size: 512,
-            maxamp: 0.03, offset: 25, sampleRate: sampleRate)
+            maxamp: 0.03, offset: 150, sampleRate: sampleRate)
         if let pitch = estimate.process(samples) {
-            XCTAssertEqual(pitch, freq, accuracy: 2)
+            XCTAssertEqual(pitch, freq, accuracy: 0.5)
         }
         else {
             XCTFail()
